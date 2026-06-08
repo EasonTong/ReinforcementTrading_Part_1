@@ -12,7 +12,7 @@ def load_and_preprocess_data(csv_path: str):
     """
     df = pd.read_csv(
         csv_path,
-        parse_dates=["Time (EET)"],
+        parse_dates=["Gmt time"],
         dayfirst=True,
     )
 
@@ -20,7 +20,7 @@ def load_and_preprocess_data(csv_path: str):
     df.columns = df.columns.str.strip()
 
     # Datetime index
-    df = df.set_index("Time (EET)")
+    df = df.set_index("Gmt time")
     df.sort_index(inplace=True)
 
     # Ensure numeric

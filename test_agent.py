@@ -38,17 +38,28 @@ def run_one_episode(model, vec_env, deterministic=True):
 
 
 def main():
-    # Choose the dataset you want to evaluate on
-    file_path = "data/EURUSD_15 Mins_Ask_2020.12.06_2025.12.12.csv"
+    # Load BTCUSDT data
+    file_path = "data/BTCUSDT_Perpetual_1H_2025-10-01_2026-06-08.csv"
     df, feature_cols = load_and_preprocess_data(file_path)
 
-    # If you want a true OOS test here, split and use only the test slice:
-    split_idx = int(len(df) * 0.8)
+    # Use test portion (last 30%)
+    split_idx = int(len(df) * 0.7)
+    train_df = df.iloc[:split_idx].copy()
     test_df = df.iloc[split_idx:].copy()
+    print(f"OOS dataset: {len(test_df)} bars")
+
+    # Feature normalization — must match training (fit on train data only)
+    market_mean = train_df[feature_cols].mean().values.astype(np.float32)
+    market_std  = train_df[feature_cols].std().values.astype(np.float32)
+    market_std  = np.where(market_std == 0, 1.0, market_std)
+    state_mean = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+    state_std  = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    feature_mean = np.concatenate([market_mean, state_mean])
+    feature_std  = np.concatenate([market_std,  state_std])
 
     # Must match training params
-    SL_OPTS = [10, 15, 25]
-    TP_OPTS = [10, 15, 25]
+    SL_OPTS = [200, 500, 1000, 2000]
+    TP_OPTS = [200, 500, 1000, 2000]
     WIN = 30
 
     test_env = ForexTradingEnv(
@@ -56,16 +67,20 @@ def main():
             window_size=WIN,
             sl_options=SL_OPTS,
             tp_options=TP_OPTS,
-            spread_pips=1.0,
+            pip_value=1.0,
+            spread_pips=0.0,
             commission_pips=0.0,
-            max_slippage_pips=0.2,
+            max_slippage_pips=0.0,
+            lot_size=1.0,
             random_start=False,
             episode_max_steps=None,
             feature_columns=feature_cols,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
             hold_reward_weight=0.005,
-            open_penalty_pips=0.5,      # half a pip per open
-            time_penalty_pips=0.02,     # 0.02 pips per bar in trade
-            unrealized_delta_weight=0.0
+            open_penalty_pips=2.0,
+            time_penalty_pips=0.02,
+            unrealized_delta_weight=0.1
     )
 
     vec_test_env = DummyVecEnv([lambda: test_env])
@@ -92,7 +107,9 @@ def main():
     plt.ylabel("Equity ($)")
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    plt.savefig("test_equity_curve.png", dpi=150)
+    print("Chart saved to test_equity_curve.png")
+    plt.close()
 
 
 if __name__ == "__main__":

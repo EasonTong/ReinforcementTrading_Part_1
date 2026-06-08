@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Model weights & checkpoints
+*.zip
+checkpoints/
+
+# Generated charts & data
+*.png
+trade_history_output.csv
+
+# IDE
+.vscode/
+.idea/
