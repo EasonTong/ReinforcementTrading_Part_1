@@ -60,6 +60,11 @@ class ForexTradingEnv(gym.Env):
         hold_reward_weight: float = 0.005,   # tuned below
         open_penalty_pips: float = 0.5,      # NEW: penalty per open
         time_penalty_pips: float = 0.02,     # NEW: cost per bar in a trade
+        risk_per_trade_pct: float | None = None,  # v2.1: dynamic position sizing (e.g. 0.02 = 2% risk per trade)
+        max_drawdown_pct: float | None = None,    # v2.1: terminate episode if equity drawdown exceeds this (e.g. 0.5 = 50%)
+        kelly_window: int = 20,                   # v2.2: rolling window size for Kelly calculation
+        kelly_max_pct: float = 0.04,              # v2.2: Kelly cap (4% max risk per trade)
+        kelly_min_pct: float = 0.01,              # v2.2: Kelly floor (1% min risk per trade)
     ):
         super().__init__()
 
@@ -91,12 +96,21 @@ class ForexTradingEnv(gym.Env):
         # pip_value (price) * lot_size (units) ≈ $ per 1.0 price move.
         # 1 pip = pip_value price move, so $/pip ≈ pip_value * lot_size.
         self.lot_size = float(lot_size)
-        self.usd_per_pip = self.pip_value * self.lot_size
+        self.base_usd_per_pip = self.pip_value * self.lot_size  # base, may be overridden per-trade
+
+        # v2.1: Dynamic position sizing & risk management
+        self.risk_per_trade_pct = float(risk_per_trade_pct) if risk_per_trade_pct is not None else None
+        self.max_drawdown_pct = float(max_drawdown_pct) if max_drawdown_pct is not None else None
+
+        # v2.2: Kelly dynamic position sizing
+        self.kelly_window = int(kelly_window)
+        self.kelly_max_pct = float(kelly_max_pct)
+        self.kelly_min_pct = float(kelly_min_pct)
+        self._trade_results = []  # list of (net_pips, usd_pnl) for closed trades
 
         # Reward handling
         self.reward_scale = float(reward_scale)
         self.unrealized_delta_weight = float(unrealized_delta_weight)
-        self.hold_reward_weight = float(hold_reward_weight)
         self.hold_reward_weight = float(hold_reward_weight)
         self.open_penalty_pips = float(open_penalty_pips)
         self.time_penalty_pips = float(time_penalty_pips)
@@ -157,9 +171,14 @@ class ForexTradingEnv(gym.Env):
         self.time_in_trade = 0
         self.prev_unrealized_pips = 0.0
 
+        # Dynamic position sizing (v2.1)
+        self._current_usd_per_pip = self.base_usd_per_pip  # per-trade, updated on open
+        self._trade_results = []  # v2.2: reset trade history for Kelly
+
         # Accounting
         self.initial_equity_usd = 10000.0
         self.equity_usd = self.initial_equity_usd
+        self.peak_equity_usd = self.initial_equity_usd  # v2.1: track peak for drawdown
 
         # Logging
         self.equity_curve = []
@@ -229,11 +248,43 @@ class ForexTradingEnv(gym.Env):
         # Simple friction model (round-trip)
         return self.spread_pips + self.commission_pips
 
+    def _compute_kelly_pct(self) -> float:
+        """v2.2: Rolling Kelly fraction from recent trades. Returns risk %."""
+        if self.risk_per_trade_pct is None:
+            return 0.0
+        n = min(len(self._trade_results), self.kelly_window)
+        if n < 5:
+            return self.risk_per_trade_pct  # not enough data, use base rate
+        recent = self._trade_results[-n:]
+        wins = [t for t in recent if t[0] > 0]
+        losses = [t for t in recent if t[0] < 0]
+        if not losses:
+            return self.kelly_max_pct  # all wins → max risk
+        if not wins:
+            return self.kelly_min_pct  # all losses → min risk
+        win_rate = len(wins) / n
+        avg_win = sum(abs(t[0]) for t in wins) / len(wins)
+        avg_loss = sum(abs(t[0]) for t in losses) / len(losses)
+        if avg_loss == 0:
+            return self.kelly_max_pct
+        # Kelly: f* = p - (1-p) / (W/L)
+        kelly = win_rate - (1.0 - win_rate) / (avg_win / avg_loss)
+        return float(np.clip(kelly, self.kelly_min_pct, self.kelly_max_pct))
+
     def _open_position(self, direction: int, sl_pips: float, tp_pips: float):
         # Entry on current close + slippage; costs applied on close (round-trip model)
         close_price = float(self.df.loc[self.current_step, "Close"])
         slip_pips = self._sample_slippage_pips()
         slip_price = slip_pips * self.pip_value
+
+        # v2.2: Kelly dynamic position sizing
+        if self.risk_per_trade_pct is not None and sl_pips > 0:
+            risk_pct = self._compute_kelly_pct()  # rolling Kelly, clamped to [min, max]
+            risk_amount = self.equity_usd * risk_pct
+            dynamic_lot = risk_amount / (sl_pips * self.pip_value)
+            self._current_usd_per_pip = self.pip_value * dynamic_lot
+        else:
+            self._current_usd_per_pip = self.base_usd_per_pip
 
         if direction == 1:  # long
             entry = close_price + slip_price
@@ -273,8 +324,14 @@ class ForexTradingEnv(gym.Env):
         cost_pips = self._cost_pips_round_trip()
         net_pips = realized_pips - cost_pips
 
-        # Update equity in USD
-        self.equity_usd += net_pips * self.usd_per_pip
+        # Update equity in USD (v2.1: use per-trade usd_per_pip)
+        usd_pnl = net_pips * self._current_usd_per_pip
+        self.equity_usd += usd_pnl
+        self.peak_equity_usd = max(self.peak_equity_usd, self.equity_usd)
+
+        # v2.2: Record trade for Kelly calculation
+        if self.risk_per_trade_pct is not None:
+            self._trade_results.append((float(net_pips), float(usd_pnl)))
 
         trade_info = {
             "event": "CLOSE",
@@ -453,6 +510,13 @@ class ForexTradingEnv(gym.Env):
 
         # 6) Log equity
         self.equity_curve.append(float(self.equity_usd))
+
+        # 6b) v2.1: Max drawdown truncation
+        if self.max_drawdown_pct is not None:
+            current_dd = (self.equity_usd - self.peak_equity_usd) / self.peak_equity_usd
+            if current_dd <= -self.max_drawdown_pct:
+                self.truncated = True
+                reward_pips -= 50.0  # heavy penalty for blowing up
 
         # 7) Build observation
         obs = self._get_observation()

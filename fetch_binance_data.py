@@ -1,7 +1,6 @@
 """
 Fetch BTCUSDT perpetual futures 1H kline data from Binance public API.
-Date range: 2025-10-01 to 2026-06-08
-Saves as CSV in data/ directory.
+Saves as CSV in data/ directory. OUTPUT_PATH auto-generated from date range.
 """
 import time
 import pandas as pd
@@ -12,8 +11,8 @@ from datetime import datetime, timezone
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"
 START_DATE = "2025-10-01"
-END_DATE = "2026-06-08"
-OUTPUT_PATH = "data/BTCUSDT_Perpetual_1H_2025-10-01_2026-06-08.csv"
+END_DATE = "2026-07-06"
+OUTPUT_PATH = f"data/BTCUSDT_Perpetual_1H_{START_DATE}_{END_DATE}.csv"
 
 # Binance futures kline endpoint (public, no API key needed)
 BASE_URL = "https://fapi.binance.com/fapi/v1/klines"
